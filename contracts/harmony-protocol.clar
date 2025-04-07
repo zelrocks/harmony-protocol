@@ -656,3 +656,75 @@
     )
   )
 )
+
+;; Enhanced security for high-value allocations
+(define-public (activate-enhanced-security (allocation-identifier uint) (security-hash (buff 32)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+      )
+      ;; Only for allocations above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "enhanced_security_activated", allocation-identifier: allocation-identifier, originator: originator, security-digest: (hash160 security-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Append allocation documentation
+(define-public (append-allocation-documentation (allocation-identifier uint) (documentation-category (string-ascii 20)) (documentation-digest (buff 32)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+      )
+      ;; Authorization check
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get allocation-status allocation-data) "completed")) (err u160))
+      (asserts! (not (is-eq (get allocation-status allocation-data) "reverted")) (err u161))
+      (asserts! (not (is-eq (get allocation-status allocation-data) "expired")) (err u162))
+
+      ;; Valid documentation categories
+      (asserts! (or (is-eq documentation-category "resource-details") 
+                   (is-eq documentation-category "allocation-proof")
+                   (is-eq documentation-category "compliance-record")
+                   (is-eq documentation-category "originator-preferences")) (err u163))
+
+      (print {action: "documentation_appended", allocation-identifier: allocation-identifier, documentation-category: documentation-category, 
+              documentation-digest: documentation-digest, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Configure delayed recovery mechanism
+(define-public (configure-delayed-recovery (allocation-identifier uint) (delay-duration uint) (recovery-destination principal))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> delay-duration u72) ERROR_INVALID_QUANTITY) ;; Minimum 72 blocks (~12 hours)
+    (asserts! (<= delay-duration u1440) ERROR_INVALID_QUANTITY) ;; Maximum 1440 blocks (~10 days)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (activation-block (+ block-height delay-duration))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq recovery-destination originator)) (err u180)) ;; Must differ from originator
+      (asserts! (not (is-eq recovery-destination (get beneficiary allocation-data))) (err u181)) ;; Must differ from beneficiary
+      (print {action: "delayed_recovery_configured", allocation-identifier: allocation-identifier, originator: originator, 
+              recovery-destination: recovery-destination, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
