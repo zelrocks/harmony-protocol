@@ -264,3 +264,82 @@
     )
   )
 )
+
+;; Create trusted recovery mechanism
+(define-public (initiate-trusted-recovery (allocation-identifier uint) (recovery-beneficiary principal))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+        (cool-down-period u144) ;; 24 hours in blocks
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get allocation-status allocation-data) "completed")) ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq (get allocation-status allocation-data) "reverted")) ERROR_ALREADY_PROCESSED) 
+      (asserts! (not (is-eq (get allocation-status allocation-data) "terminated")) ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq (get allocation-status allocation-data) "expired")) ERROR_ALREADY_PROCESSED)
+
+      (print {action: "trusted_recovery_initiated", allocation-identifier: allocation-identifier, 
+              originator: originator, recovery-beneficiary: recovery-beneficiary, 
+              execution-block: (+ block-height cool-down-period)})
+      (ok (+ block-height cool-down-period))
+    )
+  )
+)
+
+;; Implement rate-limited withdrawals for large allocations
+(define-public (configure-withdrawal-rate-limit (allocation-identifier uint) (blocks-per-withdrawal uint) (withdrawal-cap uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> blocks-per-withdrawal u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= blocks-per-withdrawal u144) ERROR_INVALID_QUANTITY) ;; Max 1 day between withdrawals
+    (asserts! (> withdrawal-cap u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+      )
+      ;; Only for significant allocations
+      (asserts! (> quantity u2000) (err u250))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (<= withdrawal-cap quantity) (err u251)) ;; Cap must be less than or equal to total
+
+      (print {action: "withdrawal_rate_limit_configured", allocation-identifier: allocation-identifier, 
+              originator: originator, blocks-per-withdrawal: blocks-per-withdrawal, 
+              withdrawal-cap: withdrawal-cap, withdrawal-periods: (/ quantity withdrawal-cap)})
+      (ok true)
+    )
+  )
+)
+
+;; Lock allocation for security investigation
+(define-public (lock-allocation-for-investigation (allocation-identifier uint) (investigation-code (string-ascii 30)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (status (get allocation-status allocation-data))
+      )
+      ;; Only supervisor or originator can lock for investigation
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender originator)) ERROR_UNAUTHORIZED)
+      ;; Cannot lock already completed or terminated allocations
+      (asserts! (not (or (is-eq status "completed") (is-eq status "terminated") 
+                          (is-eq status "reverted") (is-eq status "expired"))) ERROR_ALREADY_PROCESSED)
+      ;; Update status to locked
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { allocation-status: "locked" })
+      )
+      (print {action: "allocation_locked", allocation-identifier: allocation-identifier, investigator: tx-sender, 
+              investigation-code: investigation-code, lock-time: block-height})
+      (ok true)
+    )
+  )
+)
