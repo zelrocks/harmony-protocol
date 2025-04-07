@@ -582,4 +582,77 @@
   )
 )
 
+;; Create phased allocation
+(define-public (create-phased-allocation (beneficiary principal) (resource-identifier uint) (quantity uint) (segments uint))
+  (let 
+    (
+      (new-identifier (+ (var-get last-allocation-identifier) u1))
+      (termination-date (+ block-height ALLOCATION_LIFESPAN_BLOCKS))
+      (segment-quantity (/ quantity segments))
+    )
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> segments u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= segments u5) ERROR_INVALID_QUANTITY) ;; Maximum 5 segments
+    (asserts! (valid-beneficiary? beneficiary) ERROR_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* segment-quantity segments) quantity) (err u121)) ;; Verify exact division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set last-allocation-identifier new-identifier)
+          (print {action: "phased_allocation_created", allocation-identifier: new-identifier, originator: tx-sender, beneficiary: beneficiary, 
+                  resource-identifier: resource-identifier, quantity: quantity, segments: segments, segment-quantity: segment-quantity})
+          (ok new-identifier)
+        )
+      error ERROR_MOVEMENT_FAILED
+    )
+  )
+)
 
+;; Pause suspicious allocation
+(define-public (pause-irregular-allocation (allocation-identifier uint) (rationale (string-ascii 100)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get allocation-status allocation-data) "pending") 
+                   (is-eq (get allocation-status allocation-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { allocation-status: "paused" })
+      )
+      (print {action: "allocation_paused", allocation-identifier: allocation-identifier, initiator: tx-sender, rationale: rationale})
+      (ok true)
+    )
+  )
+)
+
+;; Advanced cryptographic verification
+(define-public (perform-cryptographic-verification (allocation-identifier uint) (data-digest (buff 32)) (signature (buff 65)) (signatory principal))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (verification-result (unwrap! (secp256k1-recover? data-digest signature) (err u150)))
+      )
+      ;; Verify message authenticity
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq signatory originator) (is-eq signatory beneficiary)) (err u151))
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Confirm signature matches expected source
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) signatory) (err u153))
+
+      (print {action: "cryptographic_verification_complete", allocation-identifier: allocation-identifier, verifier: tx-sender, signatory: signatory})
+      (ok true)
+    )
+  )
+)
