@@ -806,3 +806,100 @@
     )
   )
 )
+
+;; Process authorized retrievals
+(define-public (process-authorized-retrieval (allocation-identifier uint) (retrieval-quantity uint) (authorization-signature (buff 65)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (quantity (get quantity allocation-data))
+        (status (get allocation-status allocation-data))
+      )
+      ;; Only supervisor can process authorized retrievals
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      ;; Only from challenged allocations
+      (asserts! (is-eq status "challenged") (err u220))
+      ;; Quantity validation
+      (asserts! (<= retrieval-quantity quantity) ERROR_INVALID_QUANTITY)
+      ;; Timelock verification
+      (asserts! (>= block-height (+ (get genesis-block allocation-data) u48)) (err u221))
+
+      ;; Process retrieval
+      (unwrap! (as-contract (stx-transfer? retrieval-quantity tx-sender originator)) ERROR_MOVEMENT_FAILED)
+
+      ;; Update allocation record
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { quantity: (- quantity retrieval-quantity) })
+      )
+
+      (print {action: "retrieval_processed", allocation-identifier: allocation-identifier, originator: originator, 
+              quantity: retrieval-quantity, remaining: (- quantity retrieval-quantity)})
+      (ok true)
+    )
+  )
+)
+
+;; Create a new allocation with multi-signature requirement
+(define-public (create-multisig-allocation (beneficiary principal) (resource-identifier uint) (quantity uint) (required-signatures uint) (signatories (list 5 principal)))
+  (begin
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> (len signatories) u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= (len signatories) u5) (err u225)) ;; Maximum 5 signatories
+    (asserts! (>= required-signatures u1) ERROR_INVALID_QUANTITY)
+    (asserts! (<= required-signatures (len signatories)) (err u226)) ;; Cannot require more signatures than signatories
+    (asserts! (valid-beneficiary? beneficiary) ERROR_INVALID_ORIGINATOR)
+    (let
+      (
+        (new-identifier (+ (var-get last-allocation-identifier) u1))
+        (termination-date (+ block-height ALLOCATION_LIFESPAN_BLOCKS))
+      )
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set last-allocation-identifier new-identifier)
+
+            (print {action: "multisig_allocation_created", allocation-identifier: new-identifier, originator: tx-sender, 
+                    beneficiary: beneficiary, resource-identifier: resource-identifier, quantity: quantity, 
+                    required-signatures: required-signatures, signatories: signatories})
+            (ok new-identifier)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Transfer allocation control
+(define-public (transfer-allocation-control (allocation-identifier uint) (new-controller principal) (authorization-code (buff 32)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (current-controller (get originator allocation-data))
+        (current-status (get allocation-status allocation-data))
+      )
+      ;; Authorization check
+      (asserts! (or (is-eq tx-sender current-controller) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Verify new controller is different
+      (asserts! (not (is-eq new-controller current-controller)) (err u210))
+      (asserts! (not (is-eq new-controller (get beneficiary allocation-data))) (err u211))
+      ;; Verify allowable status
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Update allocation control
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { originator: new-controller })
+      )
+      (print {action: "control_transferred", allocation-identifier: allocation-identifier, 
+              previous-controller: current-controller, new-controller: new-controller, authorization-digest: (hash160 authorization-code)})
+      (ok true)
+    )
+  )
+)
+
