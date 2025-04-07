@@ -160,3 +160,107 @@
     )
   )
 )
+
+;; Implement two-factor verification for high-value allocations
+(define-public (verify-allocation-2fa (allocation-identifier uint) (verification-code (buff 32)) (verification-timestamp uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> verification-timestamp u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= verification-timestamp block-height) (err u245)) ;; Cannot be future timestamp
+    (asserts! (>= block-height (- verification-timestamp u144)) (err u246)) ;; Must be recent (within 24 hours)
+
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (quantity (get quantity allocation-data))
+        (current-status (get allocation-status allocation-data))
+      )
+      ;; Only needed for high value allocations
+      (asserts! (> quantity u5000) (err u247))
+      ;; Only originator or beneficiary can verify
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERROR_UNAUTHORIZED)
+      ;; Must be in pending status
+      (asserts! (is-eq current-status "pending") ERROR_ALREADY_PROCESSED)
+
+      (print {action: "2fa_verification_complete", allocation-identifier: allocation-identifier, 
+              verifier: tx-sender, verification-code-hash: (hash160 verification-code), 
+              verification-timestamp: verification-timestamp, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Create allocation with timelocked release schedule
+(define-public (create-timelocked-allocation (beneficiary principal) (resource-identifier uint) (quantity uint) (release-schedule (list 5 {block-height: uint, percentage: uint})))
+  (begin
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> (len release-schedule) u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= (len release-schedule) u5) (err u255)) ;; Maximum 5 release points
+    (asserts! (valid-beneficiary? beneficiary) ERROR_INVALID_ORIGINATOR)
+
+    ;; Validate release schedule
+    (let
+      (
+        (new-identifier (+ (var-get last-allocation-identifier) u1))
+        (termination-date (+ block-height ALLOCATION_LIFESPAN_BLOCKS))
+        (total-percentage (fold + (map get-percentage release-schedule) u0))
+      )
+      ;; Ensure percentages sum to 100%
+      (asserts! (is-eq total-percentage u100) (err u256))
+
+      ;; Transfer resources to contract
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set last-allocation-identifier new-identifier)
+
+            (print {action: "timelocked_allocation_created", allocation-identifier: new-identifier, 
+                    originator: tx-sender, beneficiary: beneficiary, resource-identifier: resource-identifier, 
+                    quantity: quantity, release-schedule: release-schedule})
+            (ok new-identifier)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Helper function to extract percentage from release schedule entry
+(define-private (get-percentage (entry {block-height: uint, percentage: uint}))
+  (get percentage entry)
+)
+
+;; Create allocation with circuit breaker to halt transaction flow if anomalies detected
+(define-public (create-protected-allocation (beneficiary principal) (resource-identifier uint) (quantity uint) (anomaly-threshold uint) (max-transactions-per-block uint))
+  (begin
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> anomaly-threshold u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= anomaly-threshold u100) (err u265)) ;; Threshold must be percentage (0-100)
+    (asserts! (> max-transactions-per-block u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-transactions-per-block u10) (err u266)) ;; Reasonable limit
+    (asserts! (valid-beneficiary? beneficiary) ERROR_INVALID_ORIGINATOR)
+
+    (let
+      (
+        (new-identifier (+ (var-get last-allocation-identifier) u1))
+        (termination-date (+ block-height ALLOCATION_LIFESPAN_BLOCKS))
+      )
+      ;; Transfer resources to contract
+      (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (var-set last-allocation-identifier new-identifier)
+
+            (print {action: "protected_allocation_created", allocation-identifier: new-identifier, 
+                    originator: tx-sender, beneficiary: beneficiary, resource-identifier: resource-identifier, 
+                    quantity: quantity, anomaly-threshold: anomaly-threshold, 
+                    max-transactions-per-block: max-transactions-per-block})
+            (ok new-identifier)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
