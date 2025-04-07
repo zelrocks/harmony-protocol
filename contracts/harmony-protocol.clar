@@ -509,4 +509,77 @@
   )
 )
 
+;; Register contingency contact
+(define-public (register-contingency-contact (allocation-identifier uint) (contingency-contact principal))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq contingency-contact tx-sender)) (err u111)) ;; Must differ from originator
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "contingency_registered", allocation-identifier: allocation-identifier, originator: originator, contingency: contingency-contact})
+      (ok true)
+    )
+  )
+)
+
+;; Arbitrate contested allocation
+(define-public (arbitrate-challenge (allocation-identifier uint) (originator-percentage uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+    (asserts! (<= originator-percentage u100) ERROR_INVALID_QUANTITY) ;; Valid percentage range
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (quantity (get quantity allocation-data))
+        (originator-share (/ (* quantity originator-percentage) u100))
+        (beneficiary-share (- quantity originator-share))
+      )
+      (asserts! (is-eq (get allocation-status allocation-data) "challenged") (err u112)) ;; Must be challenged
+      (asserts! (<= block-height (get termination-block allocation-data)) ERROR_ALLOCATION_LAPSED)
+
+      ;; Distribute originator's share
+      (unwrap! (as-contract (stx-transfer? originator-share tx-sender originator)) ERROR_MOVEMENT_FAILED)
+
+      ;; Distribute beneficiary's share
+      (unwrap! (as-contract (stx-transfer? beneficiary-share tx-sender beneficiary)) ERROR_MOVEMENT_FAILED)
+
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { allocation-status: "arbitrated" })
+      )
+      (print {action: "challenge_arbitrated", allocation-identifier: allocation-identifier, originator: originator, beneficiary: beneficiary, 
+              originator-share: originator-share, beneficiary-share: beneficiary-share, originator-percentage: originator-percentage})
+      (ok true)
+    )
+  )
+)
+
+;; Register additional oversight for significant allocations
+(define-public (register-additional-oversight (allocation-identifier uint) (overseer principal))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+      )
+      ;; Only for significant allocations (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "oversight_registered", allocation-identifier: allocation-identifier, overseer: overseer, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
 
