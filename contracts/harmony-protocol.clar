@@ -343,3 +343,90 @@
     )
   )
 )
+
+;; Add security hold period for high-risk allocations
+(define-public (add-security-hold (allocation-identifier uint) (hold-duration uint) (risk-justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> hold-duration u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= hold-duration u720) ERROR_INVALID_QUANTITY) ;; Maximum 5 days hold
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (status (get allocation-status allocation-data))
+        (current-termination (get termination-block allocation-data))
+        (extended-termination (+ current-termination hold-duration))
+      )
+      ;; Only supervisor can add security holds
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      ;; Only pending allocations can have holds added
+      (asserts! (is-eq status "pending") ERROR_ALREADY_PROCESSED)
+      ;; Update the termination block to extend the allocation period
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { 
+          allocation-status: "held", 
+          termination-block: extended-termination 
+        })
+      )
+      (print {action: "security_hold_added", allocation-identifier: allocation-identifier, hold-duration: hold-duration, 
+              original-termination: current-termination, new-termination: extended-termination, justification: risk-justification})
+      (ok true)
+    )
+  )
+)
+
+;; Originator initiates allocation termination
+(define-public (terminate-allocation (allocation-identifier uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block allocation-data)) ERROR_ALLOCATION_LAPSED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set AllocationRepository
+              { allocation-identifier: allocation-identifier }
+              (merge allocation-data { allocation-status: "terminated" })
+            )
+            (print {action: "allocation_terminated", allocation-identifier: allocation-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Implement multi-signature confirmation for high-value allocations
+(define-public (register-multisig-confirmation (allocation-identifier uint) (confirmation-signature (buff 65)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (quantity (get quantity allocation-data))
+      )
+      ;; Only for significant allocations (> 5000 STX)
+      (asserts! (> quantity u5000) (err u240))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get allocation-status allocation-data) "pending") (is-eq (get allocation-status allocation-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block allocation-data)) ERROR_ALLOCATION_LAPSED)
+
+      (print {action: "multisig_confirmation_registered", allocation-identifier: allocation-identifier, 
+              confirming-party: tx-sender, signature-hash: (hash160 confirmation-signature)})
+      (ok true)
+    )
+  )
+)
+
