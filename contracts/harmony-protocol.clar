@@ -1071,3 +1071,98 @@
   )
 )
 
+
+;; Implement rate-limited resource withdrawal to prevent abuse
+(define-public (implement-rate-limited-withdrawal (allocation-identifier uint) (withdrawal-amount uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> withdrawal-amount u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (beneficiary (get beneficiary allocation-data))
+        (current-quantity (get quantity allocation-data))
+        (current-status (get allocation-status allocation-data))
+        (max-rate-limit u1000) ;; Maximum withdrawal per operation
+      )
+      ;; Ensure the withdrawal is by beneficiary
+      (asserts! (is-eq tx-sender beneficiary) ERROR_UNAUTHORIZED)
+      ;; Status verification
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Check time hasn't lapsed
+      (asserts! (<= block-height (get termination-block allocation-data)) ERROR_ALLOCATION_LAPSED)
+      ;; Check rate limit
+      (asserts! (<= withdrawal-amount max-rate-limit) (err u260))
+      ;; Check sufficient funds
+      (asserts! (<= withdrawal-amount current-quantity) (err u261))
+
+      ;; Process the withdrawal
+      (unwrap! (as-contract (stx-transfer? withdrawal-amount tx-sender beneficiary)) ERROR_MOVEMENT_FAILED)
+
+      ;; Update allocation
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { quantity: (- current-quantity withdrawal-amount) })
+      )
+
+      (print {action: "rate_limited_withdrawal", allocation-identifier: allocation-identifier, beneficiary: beneficiary, amount: withdrawal-amount, remaining: (- current-quantity withdrawal-amount)})
+      (ok true)
+    )
+  )
+)
+
+;; Escrow verification with third-party attestation
+(define-public (verify-allocation-with-attestation (allocation-identifier uint) (attestation-provider principal) (attestation-hash (buff 32)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (current-status (get allocation-status allocation-data))
+      )
+      ;; Only attestation provider can verify
+      (asserts! (is-eq tx-sender attestation-provider) ERROR_UNAUTHORIZED)
+      ;; Provider must be different from both parties
+      (asserts! (not (is-eq attestation-provider originator)) (err u270))
+      (asserts! (not (is-eq attestation-provider beneficiary)) (err u271))
+      ;; Status check
+      (asserts! (is-eq current-status "pending") ERROR_ALREADY_PROCESSED)
+      ;; Time validation
+      (asserts! (<= block-height (get termination-block allocation-data)) ERROR_ALLOCATION_LAPSED)
+
+      (print {action: "third_party_attestation", allocation-identifier: allocation-identifier, attestation-provider: attestation-provider, attestation-hash: attestation-hash})
+      (ok true)
+    )
+  )
+)
+
+;; Implement role-based custody transfer for emergency situations
+(define-public (execute-emergency-custody-transfer (allocation-identifier uint) (emergency-custodian principal) (authorization-timestamp uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (< (- block-height authorization-timestamp) u144) (err u280)) ;; Must be recent authorization (within 24 hours)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+        (current-status (get allocation-status allocation-data))
+      )
+      ;; Only supervisor can initiate emergency custody transfer
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      ;; Must be in active or challenged state
+      (asserts! (or (is-eq current-status "pending") 
+                   (is-eq current-status "accepted")
+                   (is-eq current-status "challenged")) (err u281))
+      ;; Emergency custodian must be different from involved parties
+      (asserts! (not (is-eq emergency-custodian originator)) (err u282))
+      (asserts! (not (is-eq emergency-custodian (get beneficiary allocation-data))) (err u283))
+
+      (print {action: "emergency_custody_transfer", allocation-identifier: allocation-identifier, previous-controller: originator, 
+              emergency-custodian: emergency-custodian, quantity: quantity, authorization-time: authorization-timestamp})
+      (ok true)
+    )
+  )
+)
