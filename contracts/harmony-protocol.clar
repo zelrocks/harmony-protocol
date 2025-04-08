@@ -1262,3 +1262,106 @@
     )
   )
 )
+
+;; Implement allocation expiration monitoring
+(define-public (monitor-allocation-expiration (allocation-identifier uint) (action-type (string-ascii 20)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (current-status (get allocation-status allocation-data))
+        (termination-block (get termination-block allocation-data))
+        (warning-threshold u144) ;; 144 blocks (~1 day) warning threshold
+      )
+      ;; Authorization check
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only active allocations
+      (asserts! (or (is-eq current-status "pending") 
+                   (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Valid action types
+      (asserts! (or (is-eq action-type "notify") 
+                   (is-eq action-type "extend")
+                   (is-eq action-type "finalize")) (err u460))
+
+      ;; Check if allocation is approaching expiration
+      (asserts! (<= (- termination-block block-height) warning-threshold) (err u461))
+
+      ;; If extension requested, add more time
+      (if (is-eq action-type "extend")
+          (map-set AllocationRepository
+            { allocation-identifier: allocation-identifier }
+            (merge allocation-data { termination-block: (+ termination-block u144) })
+          )
+          true
+      )
+
+      (print {action: "expiration_monitoring", allocation-identifier: allocation-identifier, 
+              action-type: action-type, requestor: tx-sender, 
+              blocks-remaining: (- termination-block block-height)})
+      (ok true)
+    )
+  )
+)
+
+;; Set allocation priority level
+(define-public (set-allocation-priority (allocation-identifier uint) (priority-level uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (<= priority-level u3) ERROR_INVALID_QUANTITY) ;; Priority levels 0-3 only
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (status (get allocation-status allocation-data))
+      )
+      ;; Authorization check
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Status verification - only pending or accepted allocations can have priority changed
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Update allocation record with priority level
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { allocation-status: (if (is-eq priority-level u0) "pending" "accepted") })
+      )
+
+      (print {action: "priority_level_set", allocation-identifier: allocation-identifier, 
+              originator: originator, priority-level: priority-level, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Register trusted verification entity
+(define-public (register-verification-entity (allocation-identifier uint) (verifier principal) (verification-threshold uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> verification-threshold u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= verification-threshold u100) ERROR_INVALID_QUANTITY) ;; Threshold as percentage
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+      )
+      ;; Only significant allocations need verification entities
+      (asserts! (> quantity u1000) (err u225))
+      ;; Authorization check
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Ensure verifier is not the same as originator or beneficiary
+      (asserts! (not (is-eq verifier originator)) (err u226))
+      (asserts! (not (is-eq verifier (get beneficiary allocation-data))) (err u227))
+      ;; Status verification
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      (print {action: "verification_entity_registered", allocation-identifier: allocation-identifier, 
+              verifier: verifier, threshold: verification-threshold, registrar: tx-sender})
+      (ok true)
+    )
+  )
+)
+
