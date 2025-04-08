@@ -903,3 +903,84 @@
   )
 )
 
+;; Register a transaction monitor for detecting suspicious activity
+(define-public (register-transaction-monitor (allocation-identifier uint) (threshold-quantity uint) (monitor-address principal) (monitoring-period uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> threshold-quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> monitoring-period u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= monitoring-period u2880) (err u235)) ;; Max 20 days (2880 blocks)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (current-status (get allocation-status allocation-data))
+        (monitoring-end-block (+ block-height monitoring-period))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq monitor-address originator)) (err u236)) ;; Monitor must be different from originator
+      (asserts! (not (is-eq monitor-address (get beneficiary allocation-data))) (err u237)) ;; Monitor must be different from beneficiary
+
+      (print {action: "transaction_monitor_registered", allocation-identifier: allocation-identifier, 
+              threshold-quantity: threshold-quantity, monitor-address: monitor-address, 
+              end-block: monitoring-end-block, originator: originator})
+      (ok monitoring-end-block)
+    )
+  )
+)
+
+;; Register multi-signature requirement for allocation
+(define-public (register-multisig-requirement (allocation-identifier uint) (required-signers (list 5 principal)) (threshold uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len required-signers) u1) ERROR_INVALID_QUANTITY) ;; At least 2 signers required
+    (asserts! (<= (len required-signers) u5) ERROR_INVALID_QUANTITY) ;; Maximum 5 signers
+    (asserts! (> threshold u0) ERROR_INVALID_QUANTITY) ;; Threshold must be positive
+    (asserts! (<= threshold (len required-signers)) ERROR_INVALID_QUANTITY) ;; Threshold must not exceed signer count
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+        (status (get allocation-status allocation-data))
+      )
+      ;; Only for high-value transactions
+      (asserts! (> quantity u5000) (err u240))
+      ;; Only originator or supervisor can set multisig requirements
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only pending allocations can have multisig added
+      (asserts! (is-eq status "pending") ERROR_ALREADY_PROCESSED)
+      ;; Ensure originator is included in signers
+      (asserts! (is-some (index-of required-signers originator)) (err u241))
+
+      (print {action: "multisig_requirement_registered", allocation-identifier: allocation-identifier, 
+              required-signers: required-signers, threshold: threshold, registrar: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Verify allocation integrity through multi-signature approval
+(define-public (approve-allocation-multi-sig (allocation-identifier uint) (approval-signature (buff 65)) (approval-digest (buff 32)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (verification-result (unwrap! (secp256k1-recover? approval-digest approval-signature) (err u230)))
+        (signer-principal (unwrap! (principal-of? verification-result) (err u231)))
+      )
+      (asserts! (is-eq (get allocation-status allocation-data) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (or (is-eq signer-principal originator) (is-eq signer-principal beneficiary) (is-eq signer-principal PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (<= block-height (get termination-block allocation-data)) ERROR_ALLOCATION_LAPSED)
+
+      (print {action: "multi_sig_approval", allocation-identifier: allocation-identifier, signer: signer-principal, verifier: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+
