@@ -430,3 +430,83 @@
   )
 )
 
+;; Prolong allocation duration
+(define-public (prolong-allocation-timeframe (allocation-identifier uint) (additional-blocks uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> additional-blocks u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) ERROR_INVALID_QUANTITY) ;; Maximum 10 days extension
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data)) 
+        (beneficiary (get beneficiary allocation-data))
+        (existing-termination (get termination-block allocation-data))
+        (new-termination (+ existing-termination additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get allocation-status allocation-data) "pending") (is-eq (get allocation-status allocation-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { termination-block: new-termination })
+      )
+      (print {action: "timeframe_extended", allocation-identifier: allocation-identifier, requestor: tx-sender, new-termination-block: new-termination})
+      (ok true)
+    )
+  )
+)
+
+;; Reclaim resources from expired allocation
+(define-public (reclaim-lapsed-allocation (allocation-identifier uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+        (expiration (get termination-block allocation-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get allocation-status allocation-data) "pending") (is-eq (get allocation-status allocation-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (> block-height expiration) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set AllocationRepository
+              { allocation-identifier: allocation-identifier }
+              (merge allocation-data { allocation-status: "expired" })
+            )
+            (print {action: "lapsed_allocation_reclaimed", allocation-identifier: allocation-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Challenge allocation integrity
+(define-public (challenge-allocation (allocation-identifier uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get allocation-status allocation-data) "pending") (is-eq (get allocation-status allocation-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block allocation-data)) ERROR_ALLOCATION_LAPSED)
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { allocation-status: "challenged" })
+      )
+      (print {action: "allocation_challenged", allocation-identifier: allocation-identifier, challenger: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+
