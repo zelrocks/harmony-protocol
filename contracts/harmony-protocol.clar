@@ -1166,3 +1166,99 @@
     )
   )
 )
+
+;; Apply security freeze for suspicious activity
+(define-public (apply-security-freeze (allocation-identifier uint) (freeze-reason (string-ascii 50)) (freeze-duration uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> freeze-duration u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= freeze-duration u1440) ERROR_INVALID_QUANTITY) ;; Maximum 10 days freeze
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (current-status (get allocation-status allocation-data))
+        (freeze-expiration (+ block-height freeze-duration))
+      )
+      ;; Only supervisor can apply security freeze
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      ;; Only active allocations can be frozen
+      (asserts! (or (is-eq current-status "pending") 
+                   (is-eq current-status "accepted")
+                   (is-eq current-status "challenged")) ERROR_ALREADY_PROCESSED)
+      ;; Update allocation status
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { allocation-status: "frozen" })
+      )
+
+      (print {action: "security_freeze_applied", allocation-identifier: allocation-identifier, 
+              freeze-reason: freeze-reason, freeze-duration: freeze-duration, 
+              freeze-expiration: freeze-expiration})
+      (ok true)
+    )
+  )
+)
+
+;; Implement emergency resource recovery
+(define-public (execute-emergency-recovery (allocation-identifier uint) (recovery-authorization (buff 128)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+        (current-status (get allocation-status allocation-data))
+        (emergency-threshold u10000) ;; Threshold for emergency procedures
+      )
+      ;; Only supervisor can execute emergency recovery
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      ;; Only for significant allocations
+      (asserts! (> quantity emergency-threshold) (err u430))
+      ;; Only specific statuses are eligible
+      (asserts! (or (is-eq current-status "frozen") 
+                   (is-eq current-status "challenged")
+                   (is-eq current-status "paused")) (err u431))
+
+      ;; Execute the recovery
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) ERROR_MOVEMENT_FAILED)
+
+      (print {action: "emergency_recovery_executed", allocation-identifier: allocation-identifier, 
+              originator: originator, quantity: quantity, 
+              recovery-authorization-digest: (hash160 recovery-authorization)})
+      (ok true)
+    )
+  )
+)
+
+;; Record high-risk operation attempt
+(define-public (record-high-risk-operation (allocation-identifier uint) (operation-type (string-ascii 30)) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (quantity (get quantity allocation-data))
+      )
+      ;; Only supervisor or originator can record high-risk operations
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender originator)) ERROR_UNAUTHORIZED)
+      ;; Only allow for pending or accepted allocations
+      (asserts! (or (is-eq (get allocation-status allocation-data) "pending") 
+                   (is-eq (get allocation-status allocation-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+      ;; Only for significant allocations
+      (asserts! (> quantity u1000) (err u400))
+      ;; Valid operation types
+      (asserts! (or (is-eq operation-type "large-transfer") 
+                   (is-eq operation-type "cross-chain-movement")
+                   (is-eq operation-type "multi-signature-approval")
+                   (is-eq operation-type "security-parameter-change")) (err u401))
+
+      (print {action: "high_risk_operation_recorded", allocation-identifier: allocation-identifier, 
+              operation-type: operation-type, requestor: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
