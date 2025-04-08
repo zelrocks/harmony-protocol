@@ -983,4 +983,91 @@
   )
 )
 
+;; Establish time-locked withdrawal restrictions on allocation
+(define-public (establish-timelock-restrictions (allocation-identifier uint) (unlock-height uint) (authorized-accessor principal))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> unlock-height block-height) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (current-status (get allocation-status allocation-data))
+        (current-termination (get termination-block allocation-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq current-status "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (<= unlock-height current-termination) (err u240)) ;; Must unlock before termination
+      (asserts! (not (is-eq authorized-accessor originator)) (err u241)) ;; Different from originator
+
+      (map-set AllocationRepository
+        { allocation-identifier: allocation-identifier }
+        (merge allocation-data { allocation-status: "timelocked" })
+      )
+      (print {action: "timelock_established", allocation-identifier: allocation-identifier, originator: originator, unlock-height: unlock-height, authorized-accessor: authorized-accessor})
+      (ok unlock-height)
+    )
+  )
+)
+
+;; Mitigate emergency situations with circuit breaker pattern
+(define-public (activate-emergency-circuit-breaker (allocation-identifier uint) (emergency-code (buff 32)))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (originator (get originator allocation-data))
+        (beneficiary (get beneficiary allocation-data))
+        (quantity (get quantity allocation-data))
+        (code-hash (hash160 emergency-code))
+      )
+      ;; Only PROTOCOL_SUPERVISOR can activate circuit breaker
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get allocation-status allocation-data) "pending") 
+                    (is-eq (get allocation-status allocation-data) "accepted")
+                    (is-eq (get allocation-status allocation-data) "challenged")) (err u250))
+
+      (print {action: "emergency_circuit_breaker", allocation-identifier: allocation-identifier, supervisor: tx-sender, emergency-code-hash: code-hash})
+      (ok true)
+    )
+  )
+)
+
+;; Apply rate limiting to high-frequency allocation operations
+(define-public (apply-operation-rate-limit (allocation-identifier uint) (operation-type (string-ascii 20)) (cooldown-blocks uint))
+  (begin
+    (asserts! (valid-allocation-identifier? allocation-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> cooldown-blocks u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= cooldown-blocks u144) ERROR_INVALID_QUANTITY) ;; Maximum 1 day cooldown
+    (let
+      (
+        (allocation-data (unwrap! (map-get? AllocationRepository { allocation-identifier: allocation-identifier }) ERROR_MISSING_ALLOCATION))
+        (status (get allocation-status allocation-data))
+        (quantity (get quantity allocation-data))
+      )
+      ;; Only supervisor can apply rate limits
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      ;; Rate limiting only applies to active allocations
+      (asserts! (or (is-eq status "pending") 
+                    (is-eq status "accepted")
+                    (is-eq status "held")) ERROR_ALREADY_PROCESSED)
+      ;; Verify operation type is valid
+      (asserts! (or (is-eq operation-type "distribution")
+                   (is-eq operation-type "verification")
+                   (is-eq operation-type "modification")
+                   (is-eq operation-type "extension")) (err u270))
+
+      ;; High-value allocations get stricter rate limiting
+      (if (> quantity u10000)
+          (asserts! (>= cooldown-blocks u24) (err u271)) ;; Minimum 4-hour cooldown for high-value
+          true)
+
+      (print {action: "rate_limit_applied", allocation-identifier: allocation-identifier, 
+              operation-type: operation-type, cooldown-blocks: cooldown-blocks, 
+              effective-from: block-height, effective-until: (+ block-height cooldown-blocks)})
+      (ok true)
+    )
+  )
+)
 
